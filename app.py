@@ -47,11 +47,13 @@ def split_pdf_by_condition(pdf_file):
 def create_zip_from_pdfs(pdfs_bytes, zip_name):
     """Crea un archivo zip con los PDFs generados y nombre basado en la última sección procesada"""
     zip_bytes = io.BytesIO()
+    # Remueve caracteres especiales y espacios del nombre del zip
+    clean_zip_name = re.sub(r'[^\w\s]', '', zip_name).replace(' ', '')
     with zipfile.ZipFile(zip_bytes, 'w', zipfile.ZIP_DEFLATED) as zip_file:
         for filename, pdf_byte in pdfs_bytes:
             zip_file.writestr(filename, pdf_byte)
     zip_bytes.seek(0)
-    return zip_bytes, f"{zip_name.replace(' ', '_')}_PDFs_Separados.zip"
+    return zip_bytes, f"{clean_zip_name}PDFsSeparados.zip"
 
 def check_credentials(username, password):
     USERNAME = os.getenv("MY_APP_USERNAME", "admin")
@@ -99,8 +101,8 @@ def main():
                     zip_bytes, zip_filename = create_zip_from_pdfs(all_pdfs_bytes, section_name)
                     st.download_button("Descargar PDFs", zip_bytes, zip_filename, "application/zip")
                     st.success(f'Se han generado {len(all_pdfs_bytes)} PDFs')
-                else:
-                    st.error("No se encontraron secciones válidas para dividir los PDFs.")
+                # else:
+                #     st.error("No se encontraron secciones válidas para dividir los PDFs.")
         else:
             st.error("Por favor, inicia sesión para usar esta funcionalidad.")
 
