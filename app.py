@@ -10,12 +10,12 @@ def extract_section_name(text):
     match = re.search(r'Por leer en:?\s*(.+?)((?:\n|$))', text, re.IGNORECASE)
     return match.group(1).strip() if match else None
 
-def split_pdf_by_condition(pdf_file):
+def split_pdf_by_condition(pdf_file, start_count):
     """Divide un PDF basándose en la condición 'Por leer en'"""
     pdf_reader = PyPDF2.PdfReader(pdf_file)
     pdfs_bytes = []
     current_pdf_writer = None
-    section_count = 1
+    section_count = start_count
     section_name = ""
 
     for page_num in range(len(pdf_reader.pages)):
@@ -24,7 +24,7 @@ def split_pdf_by_condition(pdf_file):
         new_section_name = extract_section_name(text)
         
         if new_section_name:
-            section_name = new_section_name  # Update section name when it changes
+            section_name = new_section_name
             if current_pdf_writer:
                 pdf_bytes_io = io.BytesIO()
                 current_pdf_writer.write(pdf_bytes_io)
@@ -42,12 +42,11 @@ def split_pdf_by_condition(pdf_file):
         pdf_bytes_io.seek(0)
         pdfs_bytes.append((f'PDF_{section_count}.pdf', pdf_bytes_io.read()))
 
-    return pdfs_bytes, section_name  # Return last section name for ZIP naming
+    return pdfs_bytes, section_name, section_count + 1
 
 def create_zip_from_pdfs(pdfs_bytes, zip_name):
     """Crea un archivo zip con los PDFs generados y nombre basado en la última sección procesada"""
     zip_bytes = io.BytesIO()
-    # Remueve caracteres especiales y espacios del nombre del zip
     clean_zip_name = re.sub(r'[^\w\s]', '', zip_name).replace(' ', '')
     with zipfile.ZipFile(zip_bytes, 'w', zipfile.ZIP_DEFLATED) as zip_file:
         for filename, pdf_byte in pdfs_bytes:
@@ -91,18 +90,23 @@ def main():
             if uploaded_files:
                 all_pdfs_bytes = []
                 section_name = ""
+                current_count = 1  # Contador global para nombres únicos
+                
                 for uploaded_file in uploaded_files:
-                    pdfs_bytes, last_section_name = split_pdf_by_condition(io.BytesIO(uploaded_file.getvalue()))
+                    pdfs_bytes, last_section_name, next_count = split_pdf_by_condition(
+                        io.BytesIO(uploaded_file.getvalue()), 
+                        current_count
+                    )
                     all_pdfs_bytes.extend(pdfs_bytes)
-                    if last_section_name:  # Keep updating to get the last non-empty section name
+                    current_count = next_count  # Actualizar el contador para el siguiente archivo
+                    if last_section_name:
                         section_name = last_section_name
                 
                 if all_pdfs_bytes and st.button('Separar PDFs'):
                     zip_bytes, zip_filename = create_zip_from_pdfs(all_pdfs_bytes, section_name)
                     st.download_button("Descargar PDFs", zip_bytes, zip_filename, "application/zip")
                     st.success(f'Se han generado {len(all_pdfs_bytes)} PDFs')
-                # else:
-                #     st.error("No se encontraron secciones válidas para dividir los PDFs.")
+
         else:
             st.error("Por favor, inicia sesión para usar esta funcionalidad.")
 
