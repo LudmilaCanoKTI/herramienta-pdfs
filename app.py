@@ -10,8 +10,14 @@ def extract_section_name(text):
     match = re.search(r'Por leer en:?\s*(.+?)((?:\n|$))', text, re.IGNORECASE)
     return match.group(1).strip() if match else None
 
+def is_page_separator(text):
+    """Detecta si una página contiene 'page X of Y' o 'En proceso en' y debe actuar como separador"""
+    has_page_of = bool(re.search(r'page\s+\d+\s+of\s+\d+', text, re.IGNORECASE))
+    has_en_proceso = bool(re.search(r'En proceso en', text, re.IGNORECASE))
+    return has_page_of or has_en_proceso
+
 def split_pdf_by_condition(pdf_file, start_count):
-    """Divide un PDF basándose en la condición 'Por leer en'"""
+    """Divide un PDF basándose en 'Por leer en', 'page X of Y' o 'En proceso en'"""
     pdf_reader = PyPDF2.PdfReader(pdf_file)
     pdfs_bytes = []
     current_pdf_writer = None
@@ -21,22 +27,40 @@ def split_pdf_by_condition(pdf_file, start_count):
     for page_num in range(len(pdf_reader.pages)):
         page = pdf_reader.pages[page_num]
         text = page.extract_text()
-        new_section_name = extract_section_name(text)
         
-        if new_section_name:
-            section_name = new_section_name
+        # Verificar si es separador "Por leer en"
+        new_section_name = extract_section_name(text)
+        # Verificar si es separador "page of" o "En proceso en"
+        is_separator_to_exclude = is_page_separator(text)
+        
+        # Si encontramos cualquier tipo de separador
+        if new_section_name or is_separator_to_exclude:
+            if new_section_name:
+                section_name = new_section_name
+            
+            # Guardar el PDF anterior si existe
             if current_pdf_writer:
                 pdf_bytes_io = io.BytesIO()
                 current_pdf_writer.write(pdf_bytes_io)
                 pdf_bytes_io.seek(0)
                 pdfs_bytes.append((f'PDF_{section_count}.pdf', pdf_bytes_io.read()))
                 section_count += 1
+            
+            # Crear nuevo PDF writer
             current_pdf_writer = PyPDF2.PdfWriter()
-        
-        if current_pdf_writer:
-            current_pdf_writer.add_page(page)
+            
+            # IMPORTANTE: Si es "Por leer en", incluir la página
+            # Si es "page of" o "En proceso en", NO incluir la página (skip)
+            if new_section_name:
+                current_pdf_writer.add_page(page)
+            # Si es is_separator_to_exclude, no agregamos la página (se salta)
+        else:
+            # Página normal de contenido
+            if current_pdf_writer:
+                current_pdf_writer.add_page(page)
     
-    if current_pdf_writer:
+    # Guardar el último PDF si existe y tiene páginas
+    if current_pdf_writer and len(current_pdf_writer.pages) > 0:
         pdf_bytes_io = io.BytesIO()
         current_pdf_writer.write(pdf_bytes_io)
         pdf_bytes_io.seek(0)
@@ -82,7 +106,7 @@ def main():
         if 'logged_in' in st.session_state and st.session_state['logged_in']:
             st.markdown("""
             ### Instrucciones
-            1. Sube uno o más PDFs con secciones marcadas con "Por leer en"
+            1. Sube uno o más PDFs con secciones marcadas
             2. La aplicación separará cada PDF en archivos más pequeños
             3. Descarga el ZIP con todos los PDFs generados
             """)
