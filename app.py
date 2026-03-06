@@ -3,7 +3,9 @@ from pypdf import PdfReader, PdfWriter
 import re
 import os
 import io
+import gc
 import zipfile
+import tempfile
 
 
 def extract_section_name(text):
@@ -58,9 +60,10 @@ def clean_name_for_filename(name):
     return clean[:50] if clean else "PDF"
 
 
-def detect_format(pdf_reader):
-    """Detecta el formato del PDF: 'legacy' (Por leer en / page of / En proceso en)
-    o 'candidates' (separación directa por candidato)."""
+def detect_format(pdf_file):
+    """Detecta el formato del PDF: 'legacy' o 'candidates'.
+    Lee solo las primeras páginas para no cargar todo en memoria."""
+    pdf_reader = PdfReader(pdf_file)
     pages_to_check = min(10, len(pdf_reader.pages))
     for page_num in range(pages_to_check):
         text = pdf_reader.pages[page_num].extract_text() or ""
@@ -69,17 +72,28 @@ def detect_format(pdf_reader):
     return 'candidates'
 
 
-def split_pdf_legacy(pdf_file, start_count):
-    """Divide un PDF basándose en 'Por leer en', 'page X of Y' o 'En proceso en'"""
+def save_writer_to_zip(zip_file, pdf_writer, filename):
+    """Escribe un PdfWriter directamente al ZIP sin acumular en memoria."""
+    if pdf_writer and len(pdf_writer.pages) > 0:
+        pdf_bytes_io = io.BytesIO()
+        pdf_writer.write(pdf_bytes_io)
+        zip_file.writestr(filename, pdf_bytes_io.getvalue())
+        pdf_bytes_io.close()
+        del pdf_bytes_io
+        gc.collect()
+
+
+def split_pdf_legacy_to_zip(pdf_file, zip_file, start_count):
+    """Divide un PDF (formato legacy) escribiendo directo al ZIP."""
     pdf_reader = PdfReader(pdf_file)
-    pdfs_bytes = []
     current_pdf_writer = None
     section_count = start_count
     section_name = ""
+    total_pdfs = 0
 
     for page_num in range(len(pdf_reader.pages)):
         page = pdf_reader.pages[page_num]
-        text = page.extract_text()
+        text = page.extract_text() or ""
 
         new_section_name = extract_section_name(text)
         is_separator_to_exclude = is_page_separator(text)
@@ -89,12 +103,11 @@ def split_pdf_legacy(pdf_file, start_count):
                 section_name = new_section_name
 
             if current_pdf_writer:
-                pdf_bytes_io = io.BytesIO()
-                current_pdf_writer.write(pdf_bytes_io)
-                pdf_bytes_io.seek(0)
                 clean_section = clean_name_for_filename(section_name)
-                pdfs_bytes.append((f'{clean_section}_{section_count}.pdf', pdf_bytes_io.read()))
+                save_writer_to_zip(zip_file, current_pdf_writer, f'{clean_section}_{section_count}.pdf')
                 section_count += 1
+                total_pdfs += 1
+                del current_pdf_writer
 
             current_pdf_writer = PdfWriter()
 
@@ -105,24 +118,23 @@ def split_pdf_legacy(pdf_file, start_count):
                 current_pdf_writer.add_page(page)
 
     if current_pdf_writer and len(current_pdf_writer.pages) > 0:
-        pdf_bytes_io = io.BytesIO()
-        current_pdf_writer.write(pdf_bytes_io)
-        pdf_bytes_io.seek(0)
         clean_section = clean_name_for_filename(section_name)
-        pdfs_bytes.append((f'{clean_section}_{section_count}.pdf', pdf_bytes_io.read()))
+        save_writer_to_zip(zip_file, current_pdf_writer, f'{clean_section}_{section_count}.pdf')
+        total_pdfs += 1
+        del current_pdf_writer
 
-    return pdfs_bytes, section_name, section_count + 1
+    del pdf_reader
+    gc.collect()
+    return section_name, section_count + 1, total_pdfs
 
 
-def split_pdf_by_candidates(pdf_file, start_count):
-    """Divide un PDF separando por cada candidato nuevo.
-    Detecta el inicio de un nuevo candidato por 'Datos del candidato' o '% ajuste'.
-    Nombra los archivos con la posición + número."""
+def split_pdf_by_candidates_to_zip(pdf_file, zip_file, start_count):
+    """Divide un PDF por candidato escribiendo directo al ZIP."""
     pdf_reader = PdfReader(pdf_file)
-    pdfs_bytes = []
     current_pdf_writer = None
     section_count = start_count
     position_name = ""
+    total_pdfs = 0
 
     for page_num in range(len(pdf_reader.pages)):
         page = pdf_reader.pages[page_num]
@@ -135,12 +147,11 @@ def split_pdf_by_candidates(pdf_file, start_count):
 
         if is_new_candidate_page(text):
             if current_pdf_writer:
-                pdf_bytes_io = io.BytesIO()
-                current_pdf_writer.write(pdf_bytes_io)
-                pdf_bytes_io.seek(0)
                 clean_position = clean_name_for_filename(position_name)
-                pdfs_bytes.append((f'{clean_position}_{section_count}.pdf', pdf_bytes_io.read()))
+                save_writer_to_zip(zip_file, current_pdf_writer, f'{clean_position}_{section_count}.pdf')
                 section_count += 1
+                total_pdfs += 1
+                del current_pdf_writer
 
             current_pdf_writer = PdfWriter()
 
@@ -148,39 +159,62 @@ def split_pdf_by_candidates(pdf_file, start_count):
             current_pdf_writer.add_page(page)
 
     if current_pdf_writer:
-        pdf_bytes_io = io.BytesIO()
-        current_pdf_writer.write(pdf_bytes_io)
-        pdf_bytes_io.seek(0)
         clean_position = clean_name_for_filename(position_name)
-        pdfs_bytes.append((f'{clean_position}_{section_count}.pdf', pdf_bytes_io.read()))
+        save_writer_to_zip(zip_file, current_pdf_writer, f'{clean_position}_{section_count}.pdf')
+        total_pdfs += 1
+        del current_pdf_writer
 
-    return pdfs_bytes, position_name, section_count + 1
-
-
-def split_pdf_auto(pdf_file, start_count):
-    """Detecta automáticamente el formato del PDF y aplica la lógica correspondiente."""
-    pdf_bytes = pdf_file.read()
-
-    pdf_reader = PdfReader(io.BytesIO(pdf_bytes))
-    fmt = detect_format(pdf_reader)
-
-    if fmt == 'legacy':
-        return split_pdf_legacy(io.BytesIO(pdf_bytes), start_count)
-    else:
-        return split_pdf_by_candidates(io.BytesIO(pdf_bytes), start_count)
+    del pdf_reader
+    gc.collect()
+    return position_name, section_count + 1, total_pdfs
 
 
-def create_zip_from_pdfs(pdfs_bytes, zip_name):
-    """Crea un archivo zip con los PDFs generados y nombre basado en la última sección procesada"""
-    zip_bytes = io.BytesIO()
-    clean_zip_name = re.sub(r'[^\w\s]', '', zip_name).replace(' ', '')
+def process_files_to_zip(uploaded_files):
+    """Procesa todos los archivos y genera un ZIP en disco (no en memoria)."""
+    tmp_zip = tempfile.NamedTemporaryFile(delete=False, suffix='.zip')
+    tmp_zip_path = tmp_zip.name
+    section_name = ""
+    current_count = 1
+    total_pdfs = 0
+
+    with zipfile.ZipFile(tmp_zip, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        for uploaded_file in uploaded_files:
+            # Guardar PDF subido a disco temporalmente para no duplicar en memoria
+            tmp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
+            tmp_pdf.write(uploaded_file.getvalue())
+            tmp_pdf.close()
+
+            # Detectar formato
+            with open(tmp_pdf.name, 'rb') as f:
+                fmt = detect_format(f)
+
+            # Procesar según formato
+            with open(tmp_pdf.name, 'rb') as f:
+                if fmt == 'legacy':
+                    last_name, next_count, count = split_pdf_legacy_to_zip(
+                        f, zip_file, current_count
+                    )
+                else:
+                    last_name, next_count, count = split_pdf_by_candidates_to_zip(
+                        f, zip_file, current_count
+                    )
+
+            current_count = next_count
+            total_pdfs += count
+            if last_name:
+                section_name = last_name
+
+            # Limpiar archivo temporal
+            os.unlink(tmp_pdf.name)
+            gc.collect()
+
+    # Generar nombre del ZIP
+    clean_zip_name = re.sub(r'[^\w\s]', '', section_name).replace(' ', '')
     if not clean_zip_name:
         clean_zip_name = "Separados"
-    with zipfile.ZipFile(zip_bytes, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-        for filename, pdf_byte in pdfs_bytes:
-            zip_file.writestr(filename, pdf_byte)
-    zip_bytes.seek(0)
-    return zip_bytes, f"{clean_zip_name}_PDFsSeparados.zip"
+    zip_filename = f"{clean_zip_name}_PDFsSeparados.zip"
+
+    return tmp_zip_path, zip_filename, total_pdfs
 
 
 def check_credentials(username, password):
@@ -219,25 +253,19 @@ def main():
             4. Descarga el ZIP con todos los PDFs generados
             """)
             uploaded_files = st.file_uploader("Selecciona uno o más archivos PDF", type=['pdf'], accept_multiple_files=True)
-            if uploaded_files:
-                all_pdfs_bytes = []
-                section_name = ""
-                current_count = 1
+            if uploaded_files and st.button('Separar PDFs'):
+                with st.spinner('Procesando PDFs...'):
+                    tmp_zip_path, zip_filename, total_pdfs = process_files_to_zip(uploaded_files)
 
-                for uploaded_file in uploaded_files:
-                    pdfs_bytes, last_section_name, next_count = split_pdf_auto(
-                        io.BytesIO(uploaded_file.getvalue()),
-                        current_count
-                    )
-                    all_pdfs_bytes.extend(pdfs_bytes)
-                    current_count = next_count
-                    if last_section_name:
-                        section_name = last_section_name
+                # Leer ZIP desde disco para el botón de descarga
+                with open(tmp_zip_path, 'rb') as f:
+                    zip_data = f.read()
 
-                if all_pdfs_bytes and st.button('Separar PDFs'):
-                    zip_bytes, zip_filename = create_zip_from_pdfs(all_pdfs_bytes, section_name)
-                    st.download_button("Descargar PDFs", zip_bytes, zip_filename, "application/zip")
-                    st.success(f'Se han generado {len(all_pdfs_bytes)} PDFs')
+                # Limpiar archivo temporal
+                os.unlink(tmp_zip_path)
+
+                st.download_button("Descargar PDFs", zip_data, zip_filename, "application/zip")
+                st.success(f'Se han generado {total_pdfs} PDFs')
 
         else:
             st.error("Por favor, inicia sesión para usar esta funcionalidad.")
