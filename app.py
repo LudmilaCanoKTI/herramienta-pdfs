@@ -6,6 +6,7 @@ import io
 import gc
 import zipfile
 import tempfile
+import time
 
 
 def extract_section_name(text):
@@ -52,119 +53,112 @@ def clean_name_for_filename(name):
     return clean[:50] if clean else "PDF"
 
 
-# ── PASO 1: Escanear páginas (solo texto, rápido) ──────────────────────────
+def detect_format_fast(pdf_path):
+    """Detecta el formato leyendo solo las primeras 10 páginas."""
+    reader = PdfReader(pdf_path)
+    for i in range(min(10, len(reader.pages))):
+        text = reader.pages[i].extract_text() or ""
+        if extract_section_name(text) or is_page_separator(text):
+            del reader
+            return 'legacy'
+    del reader
+    return 'candidates'
 
-def scan_pages(pdf_path):
-    """Escanea el PDF y devuelve la lista de rangos de corte y metadatos.
-    NO guarda páginas en memoria, solo registra los índices."""
+
+def process_single_pass(pdf_path, progress_bar, status_text):
+    """Procesa el PDF en una sola pasada, escribiendo cada candidato al ZIP
+    apenas se detecta el siguiente. Mínimo uso de memoria."""
+
+    fmt = detect_format_fast(pdf_path)
     reader = PdfReader(pdf_path)
     total_pages = len(reader.pages)
 
-    # Detectar formato con las primeras 10 páginas
-    fmt = 'candidates'
-    for i in range(min(10, total_pages)):
-        text = reader.pages[i].extract_text() or ""
-        if extract_section_name(text) or is_page_separator(text):
-            fmt = 'legacy'
-            break
-
-    # Escanear todas las páginas para encontrar puntos de corte
-    cuts = []  # Lista de (start_page, end_page, include_first_page)
-    section_name = ""
-    position_name = ""
-    current_start = None
-    include_start = True
-
-    for i in range(total_pages):
-        text = reader.pages[i].extract_text() or ""
-
-        if fmt == 'legacy':
-            new_section = extract_section_name(text)
-            is_sep = is_page_separator(text)
-
-            if new_section or is_sep:
-                if new_section:
-                    section_name = new_section
-
-                if current_start is not None:
-                    cuts.append((current_start, i - 1, include_start))
-
-                current_start = i
-                include_start = bool(new_section)  # Solo incluir si es "Por leer en"
-        else:
-            if not position_name:
-                extracted = extract_position_name(text)
-                if extracted:
-                    position_name = extracted
-
-            if is_new_candidate_page(text):
-                if current_start is not None:
-                    cuts.append((current_start, i - 1, True))
-                current_start = i
-
-    # Último segmento
-    if current_start is not None:
-        cuts.append((current_start, total_pages - 1, include_start if fmt == 'legacy' else True))
-
-    del reader
-    gc.collect()
-
-    key_name = section_name if fmt == 'legacy' else position_name
-    return cuts, key_name, fmt
-
-
-# ── PASO 2: Generar PDFs a partir de los rangos ────────────────────────────
-
-def generate_zip(pdf_path, cuts, key_name, fmt, progress_bar):
-    """Genera el ZIP leyendo el PDF una sola vez y escribiendo cada segmento a disco."""
-    reader = PdfReader(pdf_path)
-    clean_key = clean_name_for_filename(key_name)
-
+    # ZIP en disco
     tmp_zip = tempfile.NamedTemporaryFile(delete=False, suffix='.zip')
     tmp_zip_path = tmp_zip.name
 
-    total_cuts = len(cuts)
+    key_name = ""
+    section_count = 1
+    current_writer = None
+    current_include = True  # Si la primera página del segmento se incluye
 
     with zipfile.ZipFile(tmp_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for idx, (start, end, include_first) in enumerate(cuts):
-            writer = PdfWriter()
 
-            for page_num in range(start, end + 1):
-                # En legacy, si es la primera página y no debe incluirse, saltar
-                if page_num == start and not include_first:
-                    continue
-                writer.add_page(reader.pages[page_num])
+        for page_num in range(total_pages):
+            text = reader.pages[page_num].extract_text() or ""
+            is_boundary = False
+            include_this_page = True
 
-            if len(writer.pages) > 0:
-                pdf_buf = io.BytesIO()
-                writer.write(pdf_buf)
-                zf.writestr(f'{clean_key}_{idx + 1}.pdf', pdf_buf.getvalue())
-                pdf_buf.close()
-                del pdf_buf
+            if fmt == 'legacy':
+                new_section = extract_section_name(text)
+                is_sep = is_page_separator(text)
 
-            del writer
-            gc.collect()
+                if new_section or is_sep:
+                    is_boundary = True
+                    if new_section:
+                        key_name = new_section
+                        include_this_page = True
+                    else:
+                        include_this_page = False
+            else:
+                if not key_name:
+                    extracted = extract_position_name(text)
+                    if extracted:
+                        key_name = extracted
 
-            # Actualizar progreso
-            progress_bar.progress((idx + 1) / total_cuts, text=f'Generando PDF {idx + 1} de {total_cuts}...')
+                if is_new_candidate_page(text):
+                    is_boundary = True
+                    include_this_page = True
 
-    tmp_zip.close()
+            # Si encontramos frontera, guardar el segmento anterior
+            if is_boundary:
+                if current_writer and len(current_writer.pages) > 0:
+                    clean_key = clean_name_for_filename(key_name)
+                    buf = io.BytesIO()
+                    current_writer.write(buf)
+                    zf.writestr(f'{clean_key}_{section_count}.pdf', buf.getvalue())
+                    buf.close()
+                    del buf
+                    section_count += 1
+
+                del current_writer
+                current_writer = PdfWriter()
+                gc.collect()
+
+                if include_this_page:
+                    current_writer.add_page(reader.pages[page_num])
+            else:
+                if current_writer:
+                    current_writer.add_page(reader.pages[page_num])
+
+            # Actualizar progreso cada página
+            progress = (page_num + 1) / total_pages
+            status_text.text(f'Página {page_num + 1} de {total_pages} — {section_count - 1} PDFs generados')
+            progress_bar.progress(progress)
+
+        # Guardar último segmento
+        if current_writer and len(current_writer.pages) > 0:
+            clean_key = clean_name_for_filename(key_name)
+            buf = io.BytesIO()
+            current_writer.write(buf)
+            zf.writestr(f'{clean_key}_{section_count}.pdf', buf.getvalue())
+            buf.close()
+            del buf
+
+    del current_writer
     del reader
+    tmp_zip.close()
     gc.collect()
 
-    zip_filename = f"{clean_key}.zip"
-    return tmp_zip_path, zip_filename, total_cuts
+    zip_filename = f"{clean_name_for_filename(key_name)}.zip"
+    return tmp_zip_path, zip_filename, section_count
 
-
-# ── Autenticación ──────────────────────────────────────────────────────────
 
 def check_credentials(username, password):
     USERNAME = os.getenv("MY_APP_USERNAME", "admin")
     PASSWORD = os.getenv("MY_APP_PASSWORD", "password")
     return username == USERNAME and password == PASSWORD
 
-
-# ── App principal ──────────────────────────────────────────────────────────
 
 def main():
     st.title('Separador de PDFs por Sección')
@@ -191,7 +185,7 @@ def main():
             1. Sube uno o más PDFs con secciones marcadas
             2. La aplicación detecta automáticamente el formato:
                - **Formato anterior**: separadores "Por leer en", "page X of Y", "En proceso en"
-               - **Formato nuevo**: separación directa por candidato (detecta "Datos del candidato" / "% ajuste")
+               - **Formato nuevo**: separación por candidato (detecta "Datos del candidato" / "% ajuste")
             3. Cada candidato/sección se separa en un PDF individual
             4. Descarga el ZIP con todos los PDFs generados
             """)
@@ -202,41 +196,29 @@ def main():
             )
 
             if uploaded_files and st.button('Separar PDFs'):
-                total_generated = 0
-                all_zip_paths = []
-
                 for file_idx, uploaded_file in enumerate(uploaded_files):
                     st.write(f'**Procesando:** {uploaded_file.name}')
 
-                    # Guardar a disco
+                    # Guardar a disco para no mantener en memoria
                     tmp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
                     tmp_pdf.write(uploaded_file.getvalue())
                     tmp_pdf.close()
 
-                    # Paso 1: Escanear (rápido, solo texto)
-                    with st.spinner('Analizando estructura del PDF...'):
-                        cuts, key_name, fmt = scan_pages(tmp_pdf.name)
+                    # Procesar en una sola pasada
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
 
-                    if not cuts:
-                        st.warning(f'No se encontraron secciones en {uploaded_file.name}')
-                        os.unlink(tmp_pdf.name)
-                        continue
-
-                    st.write(f'Se encontraron **{len(cuts)}** candidatos/secciones (formato: {fmt})')
-
-                    # Paso 2: Generar ZIP con barra de progreso
-                    progress_bar = st.progress(0, text='Generando PDFs...')
-                    tmp_zip_path, zip_filename, count = generate_zip(
-                        tmp_pdf.name, cuts, key_name, fmt, progress_bar
+                    tmp_zip_path, zip_filename, total = process_single_pass(
+                        tmp_pdf.name, progress_bar, status_text
                     )
-                    progress_bar.progress(1.0, text='¡Completado!')
 
-                    total_generated += count
+                    progress_bar.progress(1.0)
+                    status_text.text(f'¡Completado! {total} PDFs generados')
 
                     # Limpiar PDF temporal
                     os.unlink(tmp_pdf.name)
 
-                    # Leer ZIP y ofrecer descarga
+                    # Leer ZIP para descarga
                     with open(tmp_zip_path, 'rb') as f:
                         zip_data = f.read()
                     os.unlink(tmp_zip_path)
@@ -251,7 +233,7 @@ def main():
                     del zip_data
                     gc.collect()
 
-                st.success(f'Se han generado {total_generated} PDFs en total')
+                st.success('¡Proceso finalizado!')
 
         else:
             st.error("Por favor, inicia sesión para usar esta funcionalidad.")
