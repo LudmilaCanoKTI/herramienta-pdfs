@@ -92,7 +92,8 @@ def split_pdf_legacy(pdf_file, start_count):
                 pdf_bytes_io = io.BytesIO()
                 current_pdf_writer.write(pdf_bytes_io)
                 pdf_bytes_io.seek(0)
-                pdfs_bytes.append((f'PDF_{section_count}.pdf', pdf_bytes_io.read()))
+                clean_section = clean_name_for_filename(section_name)
+                pdfs_bytes.append((f'{clean_section}_{section_count}.pdf', pdf_bytes_io.read()))
                 section_count += 1
 
             current_pdf_writer = PdfWriter()
@@ -107,7 +108,8 @@ def split_pdf_legacy(pdf_file, start_count):
         pdf_bytes_io = io.BytesIO()
         current_pdf_writer.write(pdf_bytes_io)
         pdf_bytes_io.seek(0)
-        pdfs_bytes.append((f'PDF_{section_count}.pdf', pdf_bytes_io.read()))
+        clean_section = clean_name_for_filename(section_name)
+        pdfs_bytes.append((f'{clean_section}_{section_count}.pdf', pdf_bytes_io.read()))
 
     return pdfs_bytes, section_name, section_count + 1
 
