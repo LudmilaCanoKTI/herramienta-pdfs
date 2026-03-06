@@ -1,5 +1,5 @@
 import streamlit as st
-import PyPDF2
+from pypdf import PdfReader, PdfWriter
 import re
 import os
 import io
@@ -36,16 +36,13 @@ def extract_position_name(text):
     if not lines:
         return None
 
-    # El encabezado de posición se extrae como la última línea del texto
     last_line = lines[-1]
 
-    # Verificar que no sea un patrón de número de página ni datos del candidato
     if re.match(r'^\d+/\d+$', last_line):
         return None
     if re.search(r'@|\d{3}\s\d{3}\s\d{3}|% ajuste|Datos del candidato', last_line):
         return None
 
-    # Verificar que tenga una longitud razonable para ser un título de posición
     if len(last_line) > 5:
         return last_line
 
@@ -74,7 +71,7 @@ def detect_format(pdf_reader):
 
 def split_pdf_legacy(pdf_file, start_count):
     """Divide un PDF basándose en 'Por leer en', 'page X of Y' o 'En proceso en'"""
-    pdf_reader = PyPDF2.PdfReader(pdf_file)
+    pdf_reader = PdfReader(pdf_file)
     pdfs_bytes = []
     current_pdf_writer = None
     section_count = start_count
@@ -84,17 +81,13 @@ def split_pdf_legacy(pdf_file, start_count):
         page = pdf_reader.pages[page_num]
         text = page.extract_text()
 
-        # Verificar si es separador "Por leer en"
         new_section_name = extract_section_name(text)
-        # Verificar si es separador "page of" o "En proceso en"
         is_separator_to_exclude = is_page_separator(text)
 
-        # Si encontramos cualquier tipo de separador
         if new_section_name or is_separator_to_exclude:
             if new_section_name:
                 section_name = new_section_name
 
-            # Guardar el PDF anterior si existe
             if current_pdf_writer:
                 pdf_bytes_io = io.BytesIO()
                 current_pdf_writer.write(pdf_bytes_io)
@@ -102,20 +95,14 @@ def split_pdf_legacy(pdf_file, start_count):
                 pdfs_bytes.append((f'PDF_{section_count}.pdf', pdf_bytes_io.read()))
                 section_count += 1
 
-            # Crear nuevo PDF writer
-            current_pdf_writer = PyPDF2.PdfWriter()
+            current_pdf_writer = PdfWriter()
 
-            # IMPORTANTE: Si es "Por leer en", incluir la página
-            # Si es "page of" o "En proceso en", NO incluir la página (skip)
             if new_section_name:
                 current_pdf_writer.add_page(page)
-            # Si es is_separator_to_exclude, no agregamos la página (se salta)
         else:
-            # Página normal de contenido
             if current_pdf_writer:
                 current_pdf_writer.add_page(page)
 
-    # Guardar el último PDF si existe y tiene páginas
     if current_pdf_writer and len(current_pdf_writer.pages) > 0:
         pdf_bytes_io = io.BytesIO()
         current_pdf_writer.write(pdf_bytes_io)
@@ -129,7 +116,7 @@ def split_pdf_by_candidates(pdf_file, start_count):
     """Divide un PDF separando por cada candidato nuevo.
     Detecta el inicio de un nuevo candidato por 'Datos del candidato' o '% ajuste'.
     Nombra los archivos con la posición + número."""
-    pdf_reader = PyPDF2.PdfReader(pdf_file)
+    pdf_reader = PdfReader(pdf_file)
     pdfs_bytes = []
     current_pdf_writer = None
     section_count = start_count
@@ -139,14 +126,12 @@ def split_pdf_by_candidates(pdf_file, start_count):
         page = pdf_reader.pages[page_num]
         text = page.extract_text() or ""
 
-        # Extraer nombre de posición de la primera página que lo tenga
         if not position_name:
             extracted_name = extract_position_name(text)
             if extracted_name:
                 position_name = extracted_name
 
         if is_new_candidate_page(text):
-            # Guardar el PDF anterior si existe
             if current_pdf_writer:
                 pdf_bytes_io = io.BytesIO()
                 current_pdf_writer.write(pdf_bytes_io)
@@ -155,14 +140,11 @@ def split_pdf_by_candidates(pdf_file, start_count):
                 pdfs_bytes.append((f'{clean_position}_{section_count}.pdf', pdf_bytes_io.read()))
                 section_count += 1
 
-            # Iniciar nuevo PDF para este candidato
-            current_pdf_writer = PyPDF2.PdfWriter()
+            current_pdf_writer = PdfWriter()
 
-        # Agregar página al escritor actual (si existe)
         if current_pdf_writer:
             current_pdf_writer.add_page(page)
 
-    # Guardar el último candidato
     if current_pdf_writer:
         pdf_bytes_io = io.BytesIO()
         current_pdf_writer.write(pdf_bytes_io)
@@ -177,8 +159,7 @@ def split_pdf_auto(pdf_file, start_count):
     """Detecta automáticamente el formato del PDF y aplica la lógica correspondiente."""
     pdf_bytes = pdf_file.read()
 
-    # Detectar formato
-    pdf_reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
+    pdf_reader = PdfReader(io.BytesIO(pdf_bytes))
     fmt = detect_format(pdf_reader)
 
     if fmt == 'legacy':
@@ -209,7 +190,6 @@ def check_credentials(username, password):
 def main():
     st.title('Separador de PDFs por Sección')
 
-    # Menú con pestañas
     tab1, tab2 = st.tabs(["Iniciar sesión", "Procesar PDF"])
 
     with tab1:
@@ -240,7 +220,7 @@ def main():
             if uploaded_files:
                 all_pdfs_bytes = []
                 section_name = ""
-                current_count = 1  # Contador global para nombres únicos
+                current_count = 1
 
                 for uploaded_file in uploaded_files:
                     pdfs_bytes, last_section_name, next_count = split_pdf_auto(
