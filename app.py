@@ -209,10 +209,8 @@ def process_files_to_zip(uploaded_files):
             gc.collect()
 
     # Generar nombre del ZIP
-    clean_zip_name = re.sub(r'[^\w\s]', '', section_name).replace(' ', '')
-    if not clean_zip_name:
-        clean_zip_name = "Separados"
-    zip_filename = f"{clean_zip_name}_PDFsSeparados.zip"
+    clean_zip_name = clean_name_for_filename(section_name)
+    zip_filename = f"{clean_zip_name}.zip"
 
     return tmp_zip_path, zip_filename, total_pdfs
 
